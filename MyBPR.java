@@ -9,17 +9,24 @@ import org.apache.spark.api.java.function.Function2;
 import org.apache.spark.api.java.function.PairFunction;
 import org.apache.spark.mllib.linalg.Matrices;
 import org.apache.spark.mllib.linalg.Matrix;
+import org.apache.spark.mllib.linalg.distributed.CoordinateMatrix;
+import org.apache.spark.mllib.linalg.distributed.DistributedMatrix;
+import org.apache.spark.mllib.linalg.distributed.IndexedRowMatrix;
+import org.apache.spark.mllib.linalg.distributed.RowMatrix;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.storage.StorageLevel;
 import scala.Tuple2;
 
 import java.util.*;
 
+/**
+ * 需要用户物品id从1开始连续
+ */
 public class MyBPR {
 
-    static final Integer NUM_LFM =3;
-    static final Integer NUM_ITERATIONS=10;
-    static final Integer NUM_REDUCERS =2;
+    static final Integer NUM_LFM =10;
+    static final Integer NUM_ITERATIONS=100;
+    static final Integer NUM_REDUCERS =10;
 
 
     public static void main(String args[]){
@@ -27,7 +34,7 @@ public class MyBPR {
         //todo 读取数据
         SparkSession spark = SparkSession.builder().master("local").appName("Simple Application").getOrCreate();
         JavaRDD<String> stringJavaRDD = JavaSparkContext.fromSparkContext(spark.sparkContext())
-                .textFile("/Users/zhengpeiwei/Desktop/data.dat");
+                .textFile("/Users/zhengpeiwei/Downloads/ml-1m 2/ratings.dat");
         JavaRDD<User_Behavior> user_behaviorJavaRDD=stringJavaRDD.map(new Function<String, User_Behavior>() {
             @Override
             public User_Behavior call(String v1) throws Exception {
@@ -56,24 +63,28 @@ public class MyBPR {
                 return v1._2;
             }
         }).distinct().max(new DummyComparator());
+        System.out.println("!!!!!!!!!!!!!!!!   "+ numUsers+" "+numItems);
+
 
         //todo 构造用户物品隐因子矩阵
+        //这里用到了LocalMatrix 其实这又不是分布式的,算的时候还是把矩阵传到各个机子上做
+        //所以其实你用Java的ujmp做这个矩阵也可以
+        //但是若用分布式矩阵,因为其是rdd组成的,所以就有限制了(但是Spark分布式矩阵功能挺有限,根本用不到这儿)
         Matrix userMatrix = Matrices.randn(numUsers, NUM_LFM, new Random());
         Matrix itemMatrix = Matrices.randn(numItems, NUM_LFM, new Random());
 
         for (int i = 1; i <= NUM_ITERATIONS; i++) {
             final Matrix finalUserMatrix = userMatrix;
             final Matrix finalItemMatrix = itemMatrix;
-            final int finalNumItems=numItems;
             //对每一个partition做优化,分别更新用户和物品向量,使用mappartitons,每个分区调用一次call
             JavaRDD<Tuple2<Matrix, Matrix>> result = partitonedRatings.mapPartitions(new FlatMapFunction<Iterator<Tuple2<Integer, Integer>>, Tuple2<Matrix, Matrix>>() {
                 @Override
                 public Iterator<Tuple2<Matrix, Matrix>> call(Iterator<Tuple2<Integer, Integer>> tuple2Iterator) throws Exception {
-                    return sampleAndOptimizePartition(tuple2Iterator, finalUserMatrix, finalItemMatrix, finalNumItems);
+                    return sampleAndOptimizePartition(tuple2Iterator, finalUserMatrix, finalItemMatrix, numItems);
                 }
             });
 
-            //计算有多少个Partitions
+
             //把所有矩阵相加,下面再求平均
             Tuple2<Matrix, Matrix> averagedMatrices = result.reduce(new Function2<Tuple2<Matrix, Matrix>, Tuple2<Matrix, Matrix>, Tuple2<Matrix, Matrix>>() {
                 @Override
@@ -120,7 +131,12 @@ public class MyBPR {
             itemMatrix = averagedMatrices._2;
         }
 
-        //todo 在此获取最后的结果,向量存下来
+        System.out.println(predict(userMatrix,itemMatrix,1,1));
+        System.out.println(predict(userMatrix,itemMatrix,1,2));
+        System.out.println(predict(userMatrix,itemMatrix,1,3));
+        System.out.println(predict(userMatrix,itemMatrix,1,4));
+        System.out.println(predict(userMatrix,itemMatrix,1,5));
+        System.out.println(predict(userMatrix,itemMatrix,1,150));
     }
 
 
@@ -128,8 +144,7 @@ public class MyBPR {
     //对一个partition的数据进行采样和优化
     private static Iterator<Tuple2<Matrix,Matrix>> sampleAndOptimizePartition(Iterator<Tuple2<Integer,Integer>> ratings, Matrix userMatrix, Matrix itemMatrix, int numItems) {
 
-        //采样,构造数据结构
-        //
+        //采样
         //<用户id,其看过的物品>
         Map<Integer,Set<Integer>> observed=new HashMap<>();
         //使用observed记录一个用户所看过的物品
@@ -144,7 +159,6 @@ public class MyBPR {
                 observed.get(one._1).add(one._2);
             }
         }
-
         //可用于生成1-numItems的随机数
         Random randomItem=new Random();
         Random randomUser=new Random();
@@ -157,7 +171,7 @@ public class MyBPR {
             //随机抽样s
             int userIdx, posItemIdx, negItemIdx;
             while (true) {
-                //todo 选取一个用户
+                //选取一个用户
                 userIdx = keys[randomUser.nextInt(keys.length)];
                 //这个用户的看过物品集
                 Set<Integer> itemSet = observed.get(userIdx);
@@ -177,11 +191,11 @@ public class MyBPR {
                 break;
             }
         }
-
         //训练
         for(Tuple2<Integer,Tuple2<Integer,Integer>> sample:samples){
             gradientSinglePoint(sample._1, sample._2._1, sample._2._2, userMatrix, itemMatrix);
         }
+
         ArrayList<Tuple2<Matrix, Matrix>> result=new ArrayList<>();
         result.add(new Tuple2<Matrix,Matrix>(userMatrix,itemMatrix));
         return  result.iterator();
@@ -208,19 +222,33 @@ public class MyBPR {
             double negItemFactorValue = itemMatrix.apply(prodNeg-1, k);
 
             double addUser=alpha*(deri*(posItemFactorValue-negItemFactorValue)-lambdaReg*userFactorValue);
-            userMatrix.update(userId-1,k,userMatrix.apply(userId-1,k)+addUser);
+            userMatrix.update(userId-1,k,userFactorValue+addUser);
 
             double addPos=alpha*(deri*userFactorValue-lambdaReg*posItemFactorValue);
-            itemMatrix.update(prodPos-1,k,itemMatrix.apply(prodPos-1,k)+addPos);
+            itemMatrix.update(prodPos-1,k,posItemFactorValue+addPos);
 
-            double addNeg=alpha*(deri*userFactorValue-lambdaReg*negItemFactorValue);
-            itemMatrix.update(prodNeg-1,k,itemMatrix.apply(prodNeg-1,k)+addNeg);
+            double addNeg=alpha*(deri*(-userFactorValue)-lambdaReg*negItemFactorValue);
+            itemMatrix.update(prodNeg-1,k,negItemFactorValue+addNeg);
 
         }
 
     }
 
 
+
+    /**
+     * 预测分数的函数
+     * @param userMatrix
+     * @param itemMatrix
+     */
+    private static double predict(Matrix userMatrix, Matrix itemMatrix, int user, int item) {
+        double score=0.0;
+        int k=userMatrix.numCols();
+        for(int i=0;i<k;i++){
+            score+=(userMatrix.apply(user-1,i)*itemMatrix.apply(item-1,i));
+        }
+        return score;
+    }
 
 
 

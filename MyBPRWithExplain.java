@@ -70,6 +70,7 @@ public class MyBPRWithExplain {
             }
             System.out.println();
         }
+        System.out.println();
         for(int r=0;r<itemMatrix.numRows();r++){
             for(int c=0;c<itemMatrix.numCols();c++){
                 System.out.print(itemMatrix.apply(r,c)+" ");
