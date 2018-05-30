@@ -1,4 +1,5 @@
 import org.apache.spark.HashPartitioner;
+import org.apache.spark.Partition;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
@@ -18,7 +19,7 @@ import java.util.*;
 public class UserDistributedBPR {
 
     static final Integer NUM_LFM =10;
-    static final Integer NUM_ITERATIONS=20;
+    static final Integer NUM_ITERATIONS=10;
     static final Integer NUM_REDUCERS =10;
     static final Double LAMBDA_REG=0.01;
     static final Double ALPHA=0.1;
@@ -71,8 +72,17 @@ public class UserDistributedBPR {
         //划分一下
         JavaPairRDD<Integer, Tuple2<Iterable<Integer>, Vector>> partitonedUsersRatingsAndVector = usersRatingsAndVector.partitionBy(new HashPartitioner(NUM_REDUCERS)).persist(StorageLevel.MEMORY_AND_DISK());
 
+
         //todo 构造物品隐因子矩阵
         Matrix itemMatrix = Matrices.randn(numItems, NUM_LFM, new Random());
+        //todo 打印最初
+        System.out.println();
+        for(int r=0;r<itemMatrix.numRows();r++){
+            for(int c=0;c<itemMatrix.numCols();c++){
+                System.out.print(itemMatrix.apply(r,c)+" ");
+            }
+            System.out.println();
+        }
 
 
         for (int i = 1; i <= NUM_ITERATIONS; i++) {
@@ -134,7 +144,20 @@ public class UserDistributedBPR {
                     return res.iterator();
                 }
             });
-            partitonedUsersRatingsAndVector=ratingsByUser.join(userVectorsRDD).cache();
+            partitonedUsersRatingsAndVector=ratingsByUser.join(userVectorsRDD).partitionBy(new HashPartitioner(NUM_REDUCERS)).cache();
+            //这里已经验证了,如果不加partitonBy,那么partition的数量将是1
+            //List<Partition> partitions = partitonedUsersRatingsAndVector.partitions();
+            //System.out.println("partitons数量"+partitions.size());
+        }
+
+
+        //todo 打印最后
+        System.out.println();
+        for(int r=0;r<itemMatrix.numRows();r++){
+            for(int c=0;c<itemMatrix.numCols();c++){
+                System.out.print(itemMatrix.apply(r,c)+" ");
+            }
+            System.out.println();
         }
 
         //todo 最后构建用户隐因子矩阵(关键你的用户矩阵按userId编号来)

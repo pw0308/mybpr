@@ -25,7 +25,7 @@ import java.util.*;
 public class MyBPR {
 
     static final Integer NUM_LFM =10;
-    static final Integer NUM_ITERATIONS=100;
+    static final Integer NUM_ITERATIONS=40;
     static final Integer NUM_REDUCERS =10;
 
 
@@ -131,12 +131,14 @@ public class MyBPR {
             itemMatrix = averagedMatrices._2;
         }
 
-        System.out.println(predict(userMatrix,itemMatrix,1,1));
-        System.out.println(predict(userMatrix,itemMatrix,1,2));
-        System.out.println(predict(userMatrix,itemMatrix,1,3));
-        System.out.println(predict(userMatrix,itemMatrix,1,4));
-        System.out.println(predict(userMatrix,itemMatrix,1,5));
-        System.out.println(predict(userMatrix,itemMatrix,1,150));
+        //todo 打印最后
+        System.out.println();
+        for(int r=0;r<itemMatrix.numRows();r++){
+            for(int c=0;c<itemMatrix.numCols();c++){
+                System.out.print(itemMatrix.apply(r,c)+" ");
+            }
+            System.out.println();
+        }
     }
 
 
@@ -163,16 +165,16 @@ public class MyBPR {
         Random randomItem=new Random();
         Random randomUser=new Random();
         //observed里只有这个partition的用户,可以用来用户抽样
-        Integer[] keys = observed.keySet().toArray(new Integer[0]);
+        Integer[] users = observed.keySet().toArray(new Integer[0]);
         //把(u,i,0)=>(u,i,j)
         ArrayList<Tuple2<Integer,Tuple2<Integer,Integer>>> samples=new ArrayList<>();
         //生成100*User个sample
-        for (int sampleCount = 0, smax = keys.length * 100; sampleCount < smax; sampleCount++) {
+        for (int sampleCount = 0, smax = users.length * 100; sampleCount < smax; sampleCount++) {
             //随机抽样s
             int userIdx, posItemIdx, negItemIdx;
             while (true) {
                 //选取一个用户
-                userIdx = keys[randomUser.nextInt(keys.length)];
+                userIdx = users[randomUser.nextInt(users.length)];
                 //这个用户的看过物品集
                 Set<Integer> itemSet = observed.get(userIdx);
                 if (itemSet.size() == 0 || itemSet.size() == numItems)
