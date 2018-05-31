@@ -1,5 +1,4 @@
 import org.apache.spark.HashPartitioner;
-import org.apache.spark.Partition;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
@@ -19,7 +18,7 @@ import java.util.*;
 public class UserDistributedBPR {
 
     static final Integer NUM_LFM =10;
-    static final Integer NUM_ITERATIONS=10;
+    static final Integer NUM_ITERATIONS=100;
     static final Integer NUM_REDUCERS =10;
     static final Double LAMBDA_REG=0.01;
     static final Double ALPHA=0.1;
@@ -27,26 +26,25 @@ public class UserDistributedBPR {
 
     public static void main(String args[]){
 
-        //todo 读取数据
-        SparkSession spark = SparkSession.builder().master("local").appName("Simple Application").getOrCreate();
+        //读取数据
+        SparkSession spark = SparkSession.builder().master("local").appName("UserDistributedBPR").getOrCreate();
         JavaRDD<String> stringJavaRDD = JavaSparkContext.fromSparkContext(spark.sparkContext())
                 .textFile("/Users/zhengpeiwei/Downloads/ml-1m 2/ratings.dat");
-        JavaRDD<User_Behavior> user_behaviorJavaRDD=stringJavaRDD.map(new Function<String, User_Behavior>() {
+        JavaPairRDD<Integer, Integer> ratings = stringJavaRDD.map(new Function<String, User_Behavior>() {
             @Override
             public User_Behavior call(String v1) throws Exception {
                 String[] split = v1.split("::");
                 return new User_Behavior(split[0],split[1],"1");
             }
-        });
-        JavaPairRDD<Integer, Integer> ratings = user_behaviorJavaRDD.mapToPair(new PairFunction<User_Behavior, Integer, Integer>() {
+        }).mapToPair(new PairFunction<User_Behavior, Integer, Integer>() {
             @Override
             public Tuple2<Integer, Integer> call(User_Behavior user_behavior) throws Exception {
                 return new Tuple2<>(Integer.parseInt(user_behavior.getUserId()), Integer.parseInt(user_behavior.getItemId()));
             }
-        });
+        }).persist(StorageLevel.MEMORY_AND_DISK());
 
 
-        //todo 求物品数
+        //求物品数
         final int numItems=(int)ratings.map(new Function<Tuple2<Integer, Integer>, Integer>() {
             @Override
             public Integer call(Tuple2<Integer, Integer> v1) throws Exception {
@@ -54,46 +52,38 @@ public class UserDistributedBPR {
             }
         }).distinct().max(new DummyComparator());
 
-
+        //<用户,评分s>
         JavaPairRDD<Integer, Iterable<Integer>> ratingsByUser = ratings.groupByKey().persist(StorageLevel.MEMORY_AND_DISK());
-        //<用户id,<其评分们,用户向量>>
-        JavaPairRDD<Integer, Tuple2<Iterable<Integer>, Vector>> usersRatingsAndVector = ratingsByUser.mapToPair(new PairFunction<Tuple2<Integer, Iterable<Integer>>, Integer, Tuple2<Iterable<Integer>, Vector>>() {
+        ratings.unpersist();
+
+        //这里必须persist,不然再要的时候会重新计算,重新得到随机数的
+        //<用户,用户向量>
+        JavaPairRDD<Integer, Vector> userVectorsRDD = ratingsByUser.mapToPair(new PairFunction<Tuple2<Integer, Iterable<Integer>>, Integer, Vector>() {
             @Override
-            public Tuple2<Integer, Tuple2<Iterable<Integer>, Vector>> call(Tuple2<Integer, Iterable<Integer>> integerIterableTuple2) throws Exception {
+            public Tuple2<Integer, Vector> call(Tuple2<Integer, Iterable<Integer>> integerIterableTuple2) throws Exception {
                 Random random = new Random();
                 double[] values = new double[NUM_LFM];
                 for (int pos = 0; pos < NUM_LFM; pos++) {
                     values[pos] = random.nextGaussian();
                 }
-                return new Tuple2<>(integerIterableTuple2._1, new Tuple2<Iterable<Integer>, Vector>(integerIterableTuple2._2, Vectors.dense(values)));
+                return new Tuple2<>(integerIterableTuple2._1, Vectors.dense(values));
             }
-        });
+        }).persist(StorageLevel.MEMORY_AND_DISK());
 
-        //划分一下
-        JavaPairRDD<Integer, Tuple2<Iterable<Integer>, Vector>> partitonedUsersRatingsAndVector = usersRatingsAndVector.partitionBy(new HashPartitioner(NUM_REDUCERS)).persist(StorageLevel.MEMORY_AND_DISK());
-
-
-        //todo 构造物品隐因子矩阵
+        //构造物品隐因子矩阵
         Matrix itemMatrix = Matrices.randn(numItems, NUM_LFM, new Random());
-        //todo 打印最初
-        System.out.println();
-        for(int r=0;r<itemMatrix.numRows();r++){
-            for(int c=0;c<itemMatrix.numCols();c++){
-                System.out.print(itemMatrix.apply(r,c)+" ");
-            }
-            System.out.println();
-        }
 
-
+        //迭代训练
         for (int i = 1; i <= NUM_ITERATIONS; i++) {
+
             final Matrix finalItemMatrix = itemMatrix;
-            //每个partiton返回的都是一个<物品矩阵,<我管的用户们id,我管的用户们的向量>Map >
-            JavaRDD<Tuple2<Matrix, Map<Integer, Vector>>> result = partitonedUsersRatingsAndVector.mapPartitions(new FlatMapFunction<Iterator<Tuple2<Integer, Tuple2<Iterable<Integer>, Vector>>>, Tuple2<Matrix, Map<Integer, Vector>>>() {
+            JavaPairRDD<Integer, Tuple2<Iterable<Integer>, Vector>> train = ratingsByUser.join(userVectorsRDD).partitionBy(new HashPartitioner(NUM_REDUCERS));
+            JavaRDD<Tuple2<Matrix, Map<Integer, Vector>>> result = train.mapPartitions(new FlatMapFunction<Iterator<Tuple2<Integer, Tuple2<Iterable<Integer>, Vector>>>, Tuple2<Matrix, Map<Integer, Vector>>>() {
                 @Override
                 public Iterator<Tuple2<Matrix, Map<Integer, Vector>>> call(Iterator<Tuple2<Integer, Tuple2<Iterable<Integer>, Vector>>> tuple2Iterator) throws Exception {
                     return sampleAndOptimizePartition(tuple2Iterator, finalItemMatrix, numItems);
                 }
-            });
+            }).persist(StorageLevel.MEMORY_AND_DISK());
 
             //得到物品矩阵的相加结果
             Matrix averagedMatrice = result.map(new Function<Tuple2<Matrix, Map<Integer, Vector>>, Matrix>() {
@@ -117,8 +107,7 @@ public class UserDistributedBPR {
                     return Matrices.dense(numItems, NUM_LFM, values1);
                 }
             });
-
-            //todo 求物品矩阵的平均
+            //求物品矩阵的平均
             for(int r=0;r<numItems;r++){
                 for(int c=0;c<NUM_LFM;c++){
                     averagedMatrice.update(r,c,averagedMatrice.apply(r,c)/ NUM_REDUCERS);
@@ -127,14 +116,12 @@ public class UserDistributedBPR {
             itemMatrix = averagedMatrice;
 
             //把新的用户vectors再join给ratings,得到新的partitonedUsersRatingsAndVector,然后继续迭代
-            JavaRDD<Map<Integer, Vector>> map = result.map(new Function<Tuple2<Matrix, Map<Integer, Vector>>, Map<Integer, Vector>>() {
+            userVectorsRDD = result.map(new Function<Tuple2<Matrix, Map<Integer, Vector>>, Map<Integer, Vector>>() {
                 @Override
                 public Map<Integer, Vector> call(Tuple2<Matrix, Map<Integer, Vector>> v1) throws Exception {
                     return v1._2;
                 }
-            });
-
-            JavaPairRDD<Integer,Vector> userVectorsRDD=map.flatMapToPair(new PairFlatMapFunction<Map<Integer, Vector>, Integer, Vector>() {
+            }).flatMapToPair(new PairFlatMapFunction<Map<Integer, Vector>, Integer, Vector>() {
                 @Override
                 public Iterator<Tuple2<Integer, Vector>> call(Map<Integer, Vector> integerVectorMap) throws Exception {
                     ArrayList<Tuple2<Integer,Vector>> res=new ArrayList<>();
@@ -143,25 +130,20 @@ public class UserDistributedBPR {
                     }
                     return res.iterator();
                 }
-            });
-            partitonedUsersRatingsAndVector=ratingsByUser.join(userVectorsRDD).partitionBy(new HashPartitioner(NUM_REDUCERS)).cache();
-            //这里已经验证了,如果不加partitonBy,那么partition的数量将是1
-            //List<Partition> partitions = partitonedUsersRatingsAndVector.partitions();
-            //System.out.println("partitons数量"+partitions.size());
+            }).persist(StorageLevel.MEMORY_AND_DISK());
+
         }
 
+        System.out.println(predict(userVectorsRDD,itemMatrix,1,1));
+        System.out.println(predict(userVectorsRDD,itemMatrix,1,2));
+        System.out.println(predict(userVectorsRDD,itemMatrix,1,3));
+        System.out.println(predict(userVectorsRDD,itemMatrix,1,4));
+        System.out.println(predict(userVectorsRDD,itemMatrix,1,150));
 
-        //todo 打印最后
-        System.out.println();
-        for(int r=0;r<itemMatrix.numRows();r++){
-            for(int c=0;c<itemMatrix.numCols();c++){
-                System.out.print(itemMatrix.apply(r,c)+" ");
-            }
-            System.out.println();
-        }
 
-        //todo 最后构建用户隐因子矩阵(关键你的用户矩阵按userId编号来)
 
+
+        // userVectorsRDD.sortByKey().saveAsTextFile("/Users/zhengpeiwei/Desktop/res.txt");
     }
 
 
@@ -177,21 +159,16 @@ public class UserDistributedBPR {
      */
     private static Iterator<Tuple2<Matrix, Map<Integer,Vector>>> sampleAndOptimizePartition(Iterator<Tuple2<Integer, Tuple2<Iterable<Integer>, Vector>>> userRatingsFeatures, Matrix itemMatrix, int numItems) {
 
-        //得到一个<Userid,DenseVector>Map
+        //<用户id,其看过的物品>
+        Map<Integer,Set<Integer>> observed=new HashMap<>();
+        //下面在一轮遍历中,首先提取一个<Userid,DenseVector>Map,其次做抽样的事儿
         Map<Integer,Vector> userIdAndItsVector=new HashMap();
+
         for (Iterator<Tuple2<Integer, Tuple2<Iterable<Integer>, Vector>>> it = userRatingsFeatures; it.hasNext();) {
             Tuple2<Integer, Tuple2<Iterable<Integer>, Vector>> one = it.next();
             userIdAndItsVector.put(one._1,one._2._2);
-        }
 
-
-        //采样
-        //<用户id,其看过的物品>
-        Map<Integer,Set<Integer>> observed=new HashMap<>();
-        //使用observed记录一个用户所看过的物品
-        for (Iterator<Tuple2<Integer, Tuple2<Iterable<Integer>, Vector>>> it = userRatingsFeatures; it.hasNext();) {
-            //对于一个<用户,<看过物品集,其向量的>>
-            Tuple2<Integer, Tuple2<Iterable<Integer>, Vector>> one = it.next();
+            //使用observed记录一个用户所看过的物品
             if(!observed.containsKey(one._1)){
                 HashSet<Integer> items = new HashSet<>();
                 for(Integer i:one._2._1){
@@ -205,24 +182,24 @@ public class UserDistributedBPR {
                 }
             }
         }
+
         //可用于生成1-numItems的随机数
         Random randomItem=new Random();
         Random randomUser=new Random();
         //observed里只有这个partition的用户,可以用来用户抽样
-        Integer[] keys = observed.keySet().toArray(new Integer[0]);
+        Integer[] users = observed.keySet().toArray(new Integer[0]);
         //把(u,i,0)=>(u,i,j)
         ArrayList<Tuple2<Integer,Tuple2<Integer,Integer>>> samples=new ArrayList<>();
         //生成100*User个sample
-        for (int sampleCount = 0, smax = keys.length * 100; sampleCount < smax; sampleCount++) {
+        for (int sampleCount = 0, smax = users.length * 100; sampleCount < smax; sampleCount++) {
             //随机抽样s
             int userIdx, posItemIdx, negItemIdx;
             while (true) {
                 //选取一个用户
-                userIdx = keys[randomUser.nextInt(keys.length)];
+                userIdx = users[randomUser.nextInt(users.length)];
                 //这个用户的看过物品集
                 Set<Integer> itemSet = observed.get(userIdx);
-                if (itemSet.size() == 0 || itemSet.size() == numItems)
-                    continue;
+                if (itemSet.size() == 0 || itemSet.size() == numItems) continue;
                 //构造成List好随机抽样
                 List<Integer> itemList=new ArrayList<>(itemSet);
 
@@ -252,6 +229,7 @@ public class UserDistributedBPR {
 
         Double xui=0.0,xuj=0.0,x_uij;
         Vector userVector = userIdAndItsVector.get(userId);
+
         for(int k=0;k<NUM_LFM;k++){
             xui+=(userVector.apply(k)*itemMatrix.apply(prodPos-1,k));
             xuj+=(userVector.apply(k)*itemMatrix.apply(prodNeg-1,k));
@@ -259,7 +237,6 @@ public class UserDistributedBPR {
         x_uij=xui-xuj;Double deri=Math.exp(-x_uij)/(1+Math.exp(-x_uij));
 
         double[] newUserVector=new double[NUM_LFM];
-
         //更新各个向量
         for(int k=0;k<NUM_LFM;k++){
             //必须先取出来,不然若你更新了user,然而item的更新要用到user,则用到的就不是原来的值了
@@ -285,14 +262,15 @@ public class UserDistributedBPR {
 
     /**
      * 预测分数的函数
-     * @param userMatrix
+     * @param userVectors
      * @param itemMatrix
      */
-    private static double predict(Matrix userMatrix, Matrix itemMatrix, int user, int item) {
+    private static double predict(JavaPairRDD<Integer, Vector> userVectors, Matrix itemMatrix, int user, int item) {
         double score=0.0;
-        int k=userMatrix.numCols();
+        Vector userVector = userVectors.collectAsMap().get(user);
+        int k=itemMatrix.numCols();
         for(int i=0;i<k;i++){
-            score+=(userMatrix.apply(user-1,i)*itemMatrix.apply(item-1,i));
+            score+=(userVector.apply(i)*itemMatrix.apply(item-1,i));
         }
         return score;
     }

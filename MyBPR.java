@@ -25,14 +25,14 @@ import java.util.*;
 public class MyBPR {
 
     static final Integer NUM_LFM =10;
-    static final Integer NUM_ITERATIONS=40;
+    static final Integer NUM_ITERATIONS=100;
     static final Integer NUM_REDUCERS =10;
 
 
     public static void main(String args[]){
 
         //todo 读取数据
-        SparkSession spark = SparkSession.builder().master("local").appName("Simple Application").getOrCreate();
+        SparkSession spark = SparkSession.builder().master("local").appName("MyBPR").getOrCreate();
         JavaRDD<String> stringJavaRDD = JavaSparkContext.fromSparkContext(spark.sparkContext())
                 .textFile("/Users/zhengpeiwei/Downloads/ml-1m 2/ratings.dat");
         JavaRDD<User_Behavior> user_behaviorJavaRDD=stringJavaRDD.map(new Function<String, User_Behavior>() {
@@ -63,7 +63,6 @@ public class MyBPR {
                 return v1._2;
             }
         }).distinct().max(new DummyComparator());
-        System.out.println("!!!!!!!!!!!!!!!!   "+ numUsers+" "+numItems);
 
 
         //todo 构造用户物品隐因子矩阵
@@ -73,7 +72,23 @@ public class MyBPR {
         Matrix userMatrix = Matrices.randn(numUsers, NUM_LFM, new Random());
         Matrix itemMatrix = Matrices.randn(numItems, NUM_LFM, new Random());
 
+        for(int r=0;r<userMatrix.numRows();r++){
+            for(int c=0;c<userMatrix.numCols();c++){
+                System.out.print(userMatrix.apply(r,c)+" ");
+            }
+            System.out.println();
+        }
+        System.out.println();
+        for(int r=0;r<itemMatrix.numRows();r++){
+            for(int c=0;c<itemMatrix.numCols();c++){
+                System.out.print(itemMatrix.apply(r,c)+" ");
+            }
+            System.out.println();
+        }
+
+
         for (int i = 1; i <= NUM_ITERATIONS; i++) {
+
             final Matrix finalUserMatrix = userMatrix;
             final Matrix finalItemMatrix = itemMatrix;
             //对每一个partition做优化,分别更新用户和物品向量,使用mappartitons,每个分区调用一次call
@@ -131,14 +146,13 @@ public class MyBPR {
             itemMatrix = averagedMatrices._2;
         }
 
-        //todo 打印最后
-        System.out.println();
-        for(int r=0;r<itemMatrix.numRows();r++){
-            for(int c=0;c<itemMatrix.numCols();c++){
-                System.out.print(itemMatrix.apply(r,c)+" ");
-            }
-            System.out.println();
-        }
+        System.out.println(predict(userMatrix,itemMatrix,1,1));
+        System.out.println(predict(userMatrix,itemMatrix,1,2));
+        System.out.println(predict(userMatrix,itemMatrix,1,3));
+        System.out.println(predict(userMatrix,itemMatrix,1,4));
+        System.out.println(predict(userMatrix,itemMatrix,1,150));
+
+
     }
 
 
@@ -161,6 +175,7 @@ public class MyBPR {
                 observed.get(one._1).add(one._2);
             }
         }
+
         //可用于生成1-numItems的随机数
         Random randomItem=new Random();
         Random randomUser=new Random();
@@ -193,6 +208,7 @@ public class MyBPR {
                 break;
             }
         }
+
         //训练
         for(Tuple2<Integer,Tuple2<Integer,Integer>> sample:samples){
             gradientSinglePoint(sample._1, sample._2._1, sample._2._2, userMatrix, itemMatrix);

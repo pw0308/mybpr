@@ -79,7 +79,6 @@ public class MyBPRWithExplain {
         }
 
 
-
         for (int i = 1; i <= NUM_ITERATIONS; i++) {
             final Matrix finalUserMatrix = userMatrix;
             final Matrix finalItemMatrix = itemMatrix;
@@ -183,7 +182,6 @@ public class MyBPRWithExplain {
     private static Iterator<Tuple2<Matrix,Matrix>> sampleAndOptimizePartition(Iterator<Tuple2<Integer,Integer>> ratings, Matrix userMatrix, Matrix itemMatrix, int numItems) {
 
         //采样,构造数据结构
-        // todo 本来想实现像librec一样实现用户抽样,但是因为这是partition,所以用户是分片的,不好对整体抽样
         ArrayList<Tuple2<Integer,Tuple2<Integer,Integer>>> list=new ArrayList<>();
         //<用户id,其看过的物品>
         Map<Integer,Set<Integer>> observed=new HashMap<>();
